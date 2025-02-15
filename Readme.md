@@ -23,9 +23,11 @@ If using a database, ensure it has the following properties: o URL (Type: URL) o
 
 ## Setup Instructions:
 
-[Notion Database](.media/notion-table.png)
-[Setup](./env-setup.webm)
-[Demo](./demo.webm)
+[Notion Database](media/notion-table.png)
+
+[Setup](./media/env-setup.webm)
+
+[Demo](./media/demo.webm)
 
 
 Clone the Repository Example: git clone https://github.com/yourusername/notion-research-paper-automation.git cd notion-research-paper-automation
