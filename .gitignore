@@ -1,0 +1,21 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore virtual environment directories
+venv/
+dist/
+notion-venv/
+
+# Ignore environment variables file
+.env
+
+# Ignore PyInstaller build files
+/build/
+/dist/
+*.spec
+
+# Ignore log files
+*.log

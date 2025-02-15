@@ -1,0 +1,9 @@
+arxiv
+semanticscholar
+keybert
+requests
+vllm
+notion-client
+pyinstaller
+langchain_ollama
+streamlit
