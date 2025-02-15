@@ -207,7 +207,7 @@ def summarize_text(text, style="normal"):
 
 import datetime
 
-def send_to_notion(title, url, pub_date, summary_normal, summary_thrilling, score):
+def send_to_notion(title, url, authors, pub_date, summary_normal, summary_thrilling, score):
     children = [{
         "object": "block",
         "type": "paragraph",
@@ -232,6 +232,7 @@ def send_to_notion(title, url, pub_date, summary_normal, summary_thrilling, scor
     if notion_database_id_input:
         parent = {"database_id": notion_database_id_input}
         properties["URL"] = {"url": url}
+        properties["Authors"] = {"rich_text": [{"text": {"content": str(authors)}}]}
         properties["Score"] = {"rich_text": [{"text": {"content": str(score)}}]}
         properties["Publication Date"] = {"date": {"start": pub_date}}
         current_dt = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -252,6 +253,7 @@ def main(query, max_results, fetch_limit):
     st.write(f"Found {total} papers.")
     for rank, paper in enumerate(papers):
         arxiv_id = paper.entry_id.split("/")[-1]
+        authors = ", ".join(str(author.name) for author in paper.authors)  # ✅ Fixed author extraction
         abstract = paper.summary
         title = paper.title
         url = paper.entry_id
@@ -260,7 +262,7 @@ def main(query, max_results, fetch_limit):
         st.write(f"Summarizing: {title} (Score: {score})")
         summary_normal = summarize_text(abstract, style=style_normal_input)
         summary_thrilling = summarize_text(abstract, style=style_thrilling_input)
-        page_id = send_to_notion(title, url, pub_date, summary_normal, summary_thrilling, score)
+        page_id = send_to_notion(title, url, authors, pub_date, summary_normal, summary_thrilling, score)
         if page_id:
             st.write(f"Created Notion page with ID: {page_id}")
         else:
