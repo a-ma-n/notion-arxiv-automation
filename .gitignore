@@ -19,3 +19,6 @@ notion-venv/
 
 # Ignore log files
 *.log
+.env copy
+papers/*
+visited_url.txt
