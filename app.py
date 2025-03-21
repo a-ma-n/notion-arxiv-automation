@@ -1,55 +1,52 @@
-import streamlit as st
-import arxiv
-import requests
 import os
 import re
 import datetime
+import arxiv
+import streamlit as st
 from keybert import KeyBERT
-from notion_client import Client
 from langchain_ollama.llms import OllamaLLM
 from dotenv import load_dotenv
+import subprocess
+import requests
 
-# Load environment variables from .env file
+
+# Load environment variables
 load_dotenv()
 
-# Retrieve default values from environment
-DEFAULT_NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
-DEFAULT_NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "")
-DEFAULT_NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "")
-
-# Sidebar: Display and allow override for Notion configuration
 st.sidebar.title("Environment Setup")
-notion_api_key_input = st.sidebar.text_input("Notion API Key", value=DEFAULT_NOTION_TOKEN)
-notion_page_id_input = st.sidebar.text_input("Notion Page ID", value=DEFAULT_NOTION_PAGE_ID)
-notion_database_id_input = st.sidebar.text_input("Notion Database ID (optional)", value=DEFAULT_NOTION_DATABASE_ID)
-
-# Create the Notion client using the key from the UI
-notion = Client(auth=notion_api_key_input)
 
 # Force UTF-8 for stdout/stderr
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-# Initialize KeyBERT
-kw_model = KeyBERT()
+# Initialize models (moved after streamlit setup)
+@st.cache_resource
+def initialize_models():
+    try:
+        import torch
+        from sentence_transformers import SentenceTransformer
+        
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cpu":
+            st.warning("⚠️ Running on CPU. For better performance, install NVIDIA drivers and CUDA toolkit.")
+        else:
+            st.success("🚀 Running on GPU")
+        
+        # Initialize the base model with the correct device
+        model = KeyBERT(model='all-MiniLM-L6-v2')
+        return model
+    except Exception as e:
+        st.error(f"Error initializing models: {str(e)}")
+        return KeyBERT(model='all-MiniLM-L6-v2')
 
-# Sidebar: Model selection for Ollama
-available_models = ["deepseek-r1:1.5b", "llama2:7b", "qwen2.5:latest", "llama3.2:latest"]
+kw_model = initialize_models()
+
+# Sidebar: Model selection for Ollama 
+available_models = [os.getenv("LLM_MODEL")]
 selected_model = st.sidebar.selectbox("Select Ollama Model", available_models)
 llm = OllamaLLM(model=selected_model)
 
 # Sidebar: Configure summary prompt template
-default_summary_prompt = """
-Summarize this research paper in a structured way:
-
-1️⃣ Core Contributions (1-2 sentences)
-2️⃣ Key Techniques (2-3 sentences)
-3️⃣ Results (2-3 sentences)
-4️⃣ Implications (1-2 sentences)
-
-Make it {style} in tone.
-
-{text}
-""".strip()
+default_summary_prompt = os.getenv("SUMMARY_PROMPT_TEMPLATE")
 
 
 summary_prompt_template = st.sidebar.text_area("Summary Prompt Template", value=default_summary_prompt)
@@ -60,7 +57,7 @@ style_thrilling_input = st.sidebar.text_input("Enter the style you would like th
 
 # Sidebar: Configure related terms (comma separated)
 related_terms_input = st.sidebar.text_input("Enter related terms (comma separated):", 
-                                              value="bci, brain-computer interface, eeg, neural network, deep learning, llm")
+                                              value=os.getenv("ARXIV_QUERY"))
 user_related_terms = {term.strip().lower() for term in related_terms_input.split(",") if term.strip()}
 
 # Sidebar: Configure bonus multiplier for scoring
@@ -71,13 +68,13 @@ apply_bonus_multiplier = st.sidebar.checkbox("Apply Bonus Multiplier", value=Tru
 
 
 with st.sidebar.expander("How Bonus Multiplier Works"):
-    st.markdown("""
+    st.markdown(r"""
     The bonus multiplier is applied to increase a paper's score based on its rank if it is relevant.
     
     **Calculation:**  
     For a paper, the bonus is calculated as:
     
-    \[
+    \[  # noqa: W605
     \text{Bonus} = (\text{Total Papers} - \text{Paper Rank}) \times \text{Bonus Multiplier}
     \]
     
@@ -114,30 +111,35 @@ selected_sort_key = st.sidebar.selectbox("Sort By", list(sort_options.keys()), i
 selected_sort = sort_options[selected_sort_key]
 
 def get_existing_urls():
-    """
-    If using a Notion database, query it to get a set of URLs that are already stored.
-    Assumes that the "URL" property in your database is of type URL.
-    """
     urls = set()
-    if notion_database_id_input:
-        data = notion.databases.query(database_id=notion_database_id_input)
-        for page in data.get("results", []):
-            url = page.get("properties", {}).get("URL", {}).get("url")
-            if url:
-                urls.add(url)
+    try:
+        with open("visited_url.txt", "r") as f:
+            urls = set(line.strip() for line in f)
+    except FileNotFoundError:
+        urls = set()
+
     return urls
 
-def fetch_papers(query="brain-computer interface", max_results=5, fetch_limit=50):
+def fetch_papers(query=os.getenv("ARXIV_QUERY", "brain-computer interface"), max_results=5, fetch_limit=50):
+    # Create arxiv client
+    client = arxiv.Client()
     search = arxiv.Search(
         query=query,
         max_results=fetch_limit,
         sort_by=selected_sort
     )
-    results = list(search.results())
-    if notion_database_id_input:
-        existing_urls = get_existing_urls()
-        results = [paper for paper in results if paper.entry_id not in existing_urls]
-    return results[:max_results]
+ 
+    # Use client.results() instead of search.results()
+    results = list(client.results(search))
+    existing_urls = get_existing_urls()
+    
+    # Filter out papers that we've already processed
+    filtered_results = [
+        paper for paper in results 
+        if paper.entry_id not in existing_urls
+    ][:max_results]
+    
+    return filtered_results
 
 def split_text_into_chunks(text, max_length=2000):
     return [text[i:i+max_length] for i in range(0, len(text), max_length)]
@@ -207,74 +209,54 @@ def summarize_text(text, style="normal"):
 
 import datetime
 
-def send_to_notion(title, url, authors, pub_date, summary_normal, summary_thrilling, score):
-    children = [{
-        "object": "block",
-        "type": "paragraph",
-        "paragraph": {
-            "rich_text": [{"type": "text", "text": {"content": f"URL: {url}"}}]
-        }
-    }]
-    # Use the style values in the headings for the toggle blocks
-    children.extend(create_toggle_block(f"Summary", summary_normal))
-    children.extend(create_toggle_block(f"Summary Style: {style_thrilling_input}", summary_thrilling))
-    children.append({
-        "object": "block",
-        "type": "paragraph",
-        "paragraph": {
-            "rich_text": [{"type": "text", "text": {"content": f"Score: {score}"}}]
-        }
-    })
-    
-    parent = {"page_id": notion_page_id_input}
-    properties = {"title": {"title": [{"text": {"content": title}}]}}
-    
-    if notion_database_id_input:
-        parent = {"database_id": notion_database_id_input}
-        properties["URL"] = {"url": url}
-        properties["Authors"] = {"rich_text": [{"text": {"content": str(authors)}}]}
-        properties["Score"] = {"rich_text": [{"text": {"content": str(score)}}]}
-        properties["Publication Date"] = {"date": {"start": pub_date}}
-        current_dt = datetime.datetime.now().strftime("%Y-%m-%d")
-        properties["Fetched on"] = {"date": {"start": current_dt}}
-    
-    response = notion.pages.create(
-        parent=parent,
-        properties=properties,
-        children=children
-    )
-    return response.get("id")
-
 # --- Main function ---
 def main(query, max_results, fetch_limit):
-    st.write("Fetching papers...")
-    papers = fetch_papers(query=query, max_results=max_results, fetch_limit=fetch_limit)
-    total = len(papers)
-    st.write(f"Found {total} papers.")
-    for rank, paper in enumerate(papers):
+    # Create papers directory if it doesn't exist
+    os.makedirs("papers", exist_ok=True)
+    
+    # Fetch and process papers
+    papers = fetch_papers(query, max_results, fetch_limit)
+    
+    if not papers:
+        st.warning("No new papers found or all papers have been processed already.")
+        return
+
+    for paper in papers:
         arxiv_id = paper.entry_id.split("/")[-1]
-        authors = ", ".join(str(author.name) for author in paper.authors)  # ✅ Fixed author extraction
+        authors = ", ".join(str(author.name) for author in paper.authors)  # Fixed author extraction
         abstract = paper.summary
+    
         title = paper.title
         url = paper.entry_id
         pub_date = paper.published.strftime("%Y-%m-%d") if hasattr(paper, "published") else ""
-        score = compute_paper_score(arxiv_id, abstract, rank, total, user_related_terms)
+        score = compute_paper_score(arxiv_id, abstract, papers.index(paper), len(papers), user_related_terms)
         st.write(f"Summarizing: {title} (Score: {score})")
-        summary_normal = summarize_text(abstract, style=style_normal_input)
-        summary_thrilling = summarize_text(abstract, style=style_thrilling_input)
-        page_id = send_to_notion(title, url, authors, pub_date, summary_normal, summary_thrilling, score)
-        if page_id:
-            st.write(f"Created Notion page with ID: {page_id}")
-        else:
-            st.write("Skipping duplicate paper.")
+        summary_normal = summarize_text(abstract, style=style_normal_input).encode('utf-8').decode('ascii', 'ignore')
+        summary_thrilling = summarize_text(abstract, style=style_thrilling_input).encode('utf-8').decode('ascii', 'ignore')
+        with open(f"papers/{arxiv_id}.md", "w") as f:
+            f.write(f"# {title}\n")
+            f.write(f"Authors: {authors}\n")
+            f.write(f"URL: {url}\n")
+            f.write(f"Publication Date: {pub_date}\n")
+            f.write(f"Score: {score}\n")
+            f.write("\n")
+            f.write("## Summary (Normal)\n")
+            f.write(summary_normal + "\n")
+            f.write("\n")
+            f.write(f"## Summary (Style: {style_thrilling_input})\n")
+            f.write(summary_thrilling + "\n")
+
+
+        with open("visited_url.txt", "a") as f:
+            f.write(url + "\n")
 
 # --- Streamlit UI ---
-st.title("ArXiv Paper Summarizer and Notion Automation")
+st.title("ArXiv Paper Summarizer")
 
-query_input = st.text_input("Enter search query:", value="brain-computer interface AI")
+query_input = st.text_input("Enter search query:", value=os.getenv("ARXIV_QUERY"))
 max_results_input = st.number_input("Max results:", min_value=1, value=5, step=1)
 fetch_limit_input = st.number_input("Fetch limit:", min_value=1, value=50, step=1)
 
 if st.button("Run"):
     main(query_input, max_results_input, fetch_limit_input)
-    st.success("Done! Papers sent to Notion.")
+    st.success("Done! Papers summarized and saved to the 'papers' directory.")
